@@ -242,6 +242,11 @@ def update(frame):
     # ADDED: CH2 voltage -> resistance -> nominal thermistor temperature.
     # Out-of-range or invalid readings give NaN and a status, not a false temperature.
     out_of_loop_voltage_mv = float(temps[2])
+    print(
+    f"CH2 raw = {out_of_loop_voltage_mv:.6f} mV | "
+    f"Overflow flags = {overflow.value:#011b} | "
+    f"CH2 overflow = {bool(overflow.value & (1 << 2))}"
+)
     out_of_loop_resistance, out_of_loop_temp_c, out_of_loop_status = convert_ch2(
         out_of_loop_voltage_mv,
         overflow.value,
@@ -273,7 +278,7 @@ def update(frame):
     error = current_setpoint - temp_c
 
     if ENABLE_PID:
-        error = SETPOINT - temp_c
+        error = current_setpoint - temp_c
 
         # Avoid a derivative kick on the first PID iteration
         if pid_just_enabled:
