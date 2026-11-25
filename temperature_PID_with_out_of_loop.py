@@ -70,6 +70,9 @@ def convert_ch2(voltage_mv, overflow_flags=0, excitation_a=25e-6):
 
 start_voltage = 4.0
 
+# Fixed auxiliary supply on Keysight output 3 (independent of the heater PID).
+output_3_voltage = 9.0
+
 SETPOINT = 120.0
 
 RAMP_TIME = 20 * 60       # 20 minutes in seconds
@@ -127,7 +130,13 @@ supply = rm.open_resource(
     "USB0::10893::4610::MY61002725::0::INSTR"
 )
 
-# Select heater channel
+# Configure and enable the fixed-voltage output.
+# Output 3 retains its existing current-limit setting.
+supply.write("INST:NSEL 3")
+supply.write(f"VOLT {output_3_voltage:.3f}")
+supply.write("OUTPut ON")
+
+# Select heater channel; subsequent PID/manual writes act on output 2.
 supply.write("INST:NSEL 2")
 
 # Current limit
@@ -141,6 +150,7 @@ supply.write("OUTPut ON")
 
 print("Keysight PSU connected")
 print(f"Starting voltage = {start_voltage:.2f} V")
+print(f"Output 3 fixed voltage = {output_3_voltage:.2f} V")
 
 # ============================================================
 # PID / DATA INITIALISATION
@@ -263,7 +273,7 @@ def update(frame):
     error = current_setpoint - temp_c
 
     if ENABLE_PID:
-        error = current_setpoint - temp_c
+        error = SETPOINT - temp_c
 
         # Avoid a derivative kick on the first PID iteration
         if pid_just_enabled:
@@ -390,11 +400,13 @@ plt.show()
 # Run this cell when finished.
 # ============================================================
 
-try:
-    supply.write("VOLT 0")
-    supply.write("OUTPut OFF")
-except Exception:
-    pass
+for output_channel in (2, 3):
+    try:
+        supply.write(f"INST:NSEL {output_channel}")
+        supply.write("VOLT 0")
+        supply.write("OUTPut OFF")
+    except Exception:
+        pass
 
 try:
     csv_file.close()
