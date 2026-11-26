@@ -16,6 +16,17 @@ from picosdk.usbtc08 import usbtc08 as tc08
 import math
 import numpy as np
 
+
+print("Temperature table:", TEMPERATURE_C[0], "to", TEMPERATURE_C[-1], "°C")
+print("Resistance limits:", RESISTANCE_OHM[-1], "to", RESISTANCE_OHM[0], "ohm")
+
+print("Known-input test:", convert_ch2(
+    voltage_mv=31.1726868,
+    overflow_flags=0,
+    excitation_a=25e-6,
+))
+
+
 # Terminal board is driven by a unity-gain voltage buffer.
 # Scaling means: thermistor voltage = TC-08 raw voltage * 10.105.
 # The buffer isolates the thermistor from terminal-board input loading.
@@ -93,6 +104,15 @@ def convert_ch2(
     )
     return resistance, float(1.0 / inverse_kelvin - 273.15), 'ok'
 
+
+print(
+    f"RAW={out_of_loop_voltage_mv:.6f} mV | "
+    f"SCALED={out_of_loop_sensor_voltage_mv:.6f} mV | "
+    f"R={out_of_loop_resistance:.3f} ohm | "
+    f"T={out_of_loop_temp_c} °C | "
+    f"STATUS={out_of_loop_status} | "
+    f"OVERFLOW={overflow.value:#011b}"
+)
 
 #============================================================
 # USER SETTINGS
