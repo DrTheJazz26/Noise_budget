@@ -16,9 +16,23 @@ from picosdk.usbtc08 import usbtc08 as tc08
 import math
 import numpy as np
 
-# ADDED: thermistor conversion is inserted here.
-TEMPERATURE_C = np.arange(50.0, 151.0)
+# Measured terminal-board parameters at the input terminals in use.
+# Scaling means: thermistor voltage = TC-08 raw voltage * 10.105.
+# 10.1 kohm is the TOTAL effective input impedance of the connected board.
+# Do not add the TC-08 input impedance separately to this measured value.
+TERMINAL_BOARD_SCALE = 10.105
+TERMINAL_BOARD_INPUT_OHM = 10.1e3
+
+# G10K3976 nominal datasheet table, now including room temperature.
+TEMPERATURE_C = np.arange(0.0, 151.0)
 RESISTANCE_OHM = 1000.0 * np.array([
+    32.68, 31.06, 29.53, 28.08, 26.71, 25.41, 24.19, 23.03,
+    21.93, 20.90, 19.91, 18.98, 18.10, 17.26, 16.47, 15.72,
+    15.00, 14.33, 13.68, 13.07, 12.49, 11.94, 11.42, 10.92,
+    10.45, 10.00, 9.572, 9.164, 8.776, 8.407, 8.055, 7.720,
+    7.401, 7.097, 6.806, 6.530, 6.266, 6.014, 5.773, 5.544,
+    5.325, 5.115, 4.915, 4.724, 4.542, 4.367, 4.200, 4.041,
+    3.888, 3.742,
     3.602, 3.468, 3.339, 3.217, 3.099, 2.986, 2.878, 2.774,
     2.675, 2.580, 2.488, 2.401, 2.317, 2.236, 2.158, 2.084,
     2.012, 1.944, 1.878, 1.814, 1.753, 1.695, 1.639, 1.584,
@@ -36,16 +50,34 @@ RESISTANCE_OHM = 1000.0 * np.array([
 ])
 
 
-def convert_ch2(voltage_mv, overflow_flags=0, excitation_a=25e-6):
+def convert_ch2(
+    voltage_mv, overflow_flags=0, excitation_a=25e-6,
+    scale_factor=TERMINAL_BOARD_SCALE,
+    terminal_input_ohm=TERMINAL_BOARD_INPUT_OHM,
+):
     """Return resistance in ohms, temperature in Celsius, and a status string.
 
-    Raw TC-08 voltage-mode values are mV, not volts. Channel 2 overflow
-    is bit 2 in the get_single overflow word. Invalid results remain NaN.
-    Resistance is V/I; finite logger input impedance is not corrected.
+    Raw TC-08 voltage-mode values are mV, AFTER terminal-board attenuation.
+    The +/-70 mV range check applies to that raw reading, before scaling.
+    Channel 2 overflow is bit 2 in the get_single overflow word.
+
+    Assumes the total fixed excitation current splits between the thermistor
+    and the terminal-board input connected in parallel across its sense leads:
+        sensor_v = raw_mv * 1e-3 * scale_factor
+        thermistor_current = excitation_a - sensor_v / terminal_input_ohm
+        resistance = sensor_v / thermistor_current
+    Input impedance and scale must describe the same connected board/range.
+    Invalid results remain NaN; the nominal table does not calibrate the sensor.
     """
     excitation_a = float(excitation_a)
     if not math.isfinite(excitation_a) or excitation_a <= 0:
         raise ValueError('Excitation current must be positive and finite.')
+    scale_factor = float(scale_factor)
+    terminal_input_ohm = float(terminal_input_ohm)
+    if not math.isfinite(scale_factor) or scale_factor <= 0:
+        raise ValueError('Terminal-board scaling factor must be positive and finite.')
+    if not math.isfinite(terminal_input_ohm) or terminal_input_ohm <= 0:
+        raise ValueError('Terminal-board input impedance must be positive and finite.')
     voltage_mv = float(voltage_mv)
     if not math.isfinite(voltage_mv):
         return math.nan, math.nan, 'nonfinite_voltage'
@@ -53,11 +85,19 @@ def convert_ch2(voltage_mv, overflow_flags=0, excitation_a=25e-6):
         return math.nan, math.nan, 'channel_2_overrange'
     if voltage_mv <= 0:
         return math.nan, math.nan, 'nonpositive_voltage_check_polarity'
-    resistance = voltage_mv * 1e-3 / excitation_a
-    if not RESISTANCE_OHM[-1] <= resistance <= RESISTANCE_OHM[0]:
-        return resistance, math.nan, 'outside_50_to_150_C_table'
+    sensor_voltage_v = voltage_mv * 1e-3 * scale_factor
+    thermistor_current_a = excitation_a - sensor_voltage_v / terminal_input_ohm
+    if thermistor_current_a <= 0:
+        return math.nan, math.nan, 'nonpositive_thermistor_current_check_scale_or_wiring'
+    resistance = sensor_voltage_v / thermistor_current_a
+    r_min, r_max = RESISTANCE_OHM[-1], RESISTANCE_OHM[0]
+    tolerance = 1e-9 * r_max
+    if not r_min - tolerance <= resistance <= r_max + tolerance:
+        return resistance, math.nan, 'outside_0_to_150_C_table'
+    # Only clamp machine-rounding excursions at table endpoints.
+    resistance_for_interp = float(np.clip(resistance, r_min, r_max))
     inverse_kelvin = np.interp(
-        np.log(resistance),
+        np.log(resistance_for_interp),
         np.log(RESISTANCE_OHM[::-1]),
         1.0 / (TEMPERATURE_C[::-1] + 273.15),
     )
@@ -75,7 +115,7 @@ output_3_voltage = 9.0
 
 SETPOINT = 120.0
 
-RAMP_TIME = 20 * 60       # 20 minutes in seconds
+RAMP_TIME = 15 * 60       # 20 minutes in seconds
 
 initial_temperature = None
 ramp_start_time = None
@@ -151,6 +191,8 @@ supply.write("OUTPut ON")
 print("Keysight PSU connected")
 print(f"Starting voltage = {start_voltage:.2f} V")
 print(f"Output 3 fixed voltage = {output_3_voltage:.2f} V")
+print(f"CH2 terminal board: scale = {TERMINAL_BOARD_SCALE:g}, "
+      f"input impedance = {TERMINAL_BOARD_INPUT_OHM:g} ohm")
 
 # ============================================================
 # PID / DATA INITIALISATION
@@ -186,7 +228,12 @@ csv_writer.writerow([
     "out_of_loop_temperature_C",
     "out_of_loop_voltage_mV",
     "out_of_loop_resistance_ohm",
-    "out_of_loop_status"
+    "out_of_loop_status",
+    "out_of_loop_sensor_voltage_mV",
+    "out_of_loop_thermistor_current_uA",
+    "excitation_current_A",
+    "terminal_board_scale",
+    "terminal_board_input_ohm"
 ])
 
 print(f"Logging to {csv_filename}")
@@ -239,18 +286,19 @@ def update(frame):
 
     temp_c = float(temps[1])
 
-    # ADDED: CH2 voltage -> resistance -> nominal thermistor temperature.
-    # Out-of-range or invalid readings give NaN and a status, not a false temperature.
+    # CH2 raw mV -> undo attenuation -> subtract board input current -> R -> T.
     out_of_loop_voltage_mv = float(temps[2])
-    print(
-    f"CH2 raw = {out_of_loop_voltage_mv:.6f} mV | "
-    f"Overflow flags = {overflow.value:#011b} | "
-    f"CH2 overflow = {bool(overflow.value & (1 << 2))}"
-)
+    out_of_loop_sensor_voltage_mv = out_of_loop_voltage_mv * TERMINAL_BOARD_SCALE
+    out_of_loop_thermistor_current_ua = (
+        excitation_current
+        - out_of_loop_sensor_voltage_mv * 1e-3 / TERMINAL_BOARD_INPUT_OHM
+    ) * 1e6
     out_of_loop_resistance, out_of_loop_temp_c, out_of_loop_status = convert_ch2(
         out_of_loop_voltage_mv,
         overflow.value,
         excitation_current,
+        scale_factor=TERMINAL_BOARD_SCALE,
+        terminal_input_ohm=TERMINAL_BOARD_INPUT_OHM,
     )
 
 # Initialise ramp on first temperature reading
@@ -326,7 +374,12 @@ def update(frame):
         out_of_loop_temp_c,
         out_of_loop_voltage_mv,
         out_of_loop_resistance,
-        out_of_loop_status
+        out_of_loop_status,
+        out_of_loop_sensor_voltage_mv,
+        out_of_loop_thermistor_current_ua,
+        excitation_current,
+        TERMINAL_BOARD_SCALE,
+        TERMINAL_BOARD_INPUT_OHM
     ])
     csv_file.flush()
 
@@ -343,6 +396,10 @@ def update(frame):
     print(
         f"T = {temp_c:7.2f} °C | "
         f"Out-of-loop = {out_of_loop_temp_c:8.4f} °C ({out_of_loop_status}) | "
+        f"CH2 raw = {out_of_loop_voltage_mv:.6f} mV | "
+        f"Sensor = {out_of_loop_sensor_voltage_mv:.6f} mV | "
+        f"Thermistor I = {out_of_loop_thermistor_current_ua:.4f} uA | "
+        f"Overflow = {overflow.value:#011b} | "
         f"V = {pid_voltage:5.2f} V | "
         f"PID = {ENABLE_PID}"
     )
@@ -399,7 +456,7 @@ print("  p          : toggle PID")
 print("  up arrow   : increase voltage in manual mode")
 print("  down arrow : decrease voltage in manual mode")
 
-plt.show()
+plt.show(block=True)
 # ============================================================
 # CLEANUP
 # Run this cell when finished.
