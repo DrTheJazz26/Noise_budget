@@ -16,12 +16,10 @@ from picosdk.usbtc08 import usbtc08 as tc08
 import math
 import numpy as np
 
-# Measured terminal-board parameters at the input terminals in use.
+# Terminal board is driven by a unity-gain voltage buffer.
 # Scaling means: thermistor voltage = TC-08 raw voltage * 10.105.
-# 10.1 kohm is the TOTAL effective input impedance of the connected board.
-# Do not add the TC-08 input impedance separately to this measured value.
+# The buffer isolates the thermistor from terminal-board input loading.
 TERMINAL_BOARD_SCALE = 10.105
-TERMINAL_BOARD_INPUT_OHM = 10.1e3
 
 # G10K3976 nominal datasheet table, now including room temperature.
 TEMPERATURE_C = np.arange(0.0, 151.0)
@@ -53,7 +51,6 @@ RESISTANCE_OHM = 1000.0 * np.array([
 def convert_ch2(
     voltage_mv, overflow_flags=0, excitation_a=25e-6,
     scale_factor=TERMINAL_BOARD_SCALE,
-    terminal_input_ohm=TERMINAL_BOARD_INPUT_OHM,
 ):
     """Return resistance in ohms, temperature in Celsius, and a status string.
 
@@ -61,23 +58,19 @@ def convert_ch2(
     The +/-70 mV range check applies to that raw reading, before scaling.
     Channel 2 overflow is bit 2 in the get_single overflow word.
 
-    Assumes the total fixed excitation current splits between the thermistor
-    and the terminal-board input connected in parallel across its sense leads:
+    Assumes a unity-gain buffer reproduces the voltage across the thermistor
+    and drives the terminal board, so excitation_a flows through the thermistor:
         sensor_v = raw_mv * 1e-3 * scale_factor
-        thermistor_current = excitation_a - sensor_v / terminal_input_ohm
-        resistance = sensor_v / thermistor_current
-    Input impedance and scale must describe the same connected board/range.
+        resistance = sensor_v / excitation_a
+    No terminal-board input-impedance correction is applied.
     Invalid results remain NaN; the nominal table does not calibrate the sensor.
     """
     excitation_a = float(excitation_a)
     if not math.isfinite(excitation_a) or excitation_a <= 0:
         raise ValueError('Excitation current must be positive and finite.')
     scale_factor = float(scale_factor)
-    terminal_input_ohm = float(terminal_input_ohm)
     if not math.isfinite(scale_factor) or scale_factor <= 0:
         raise ValueError('Terminal-board scaling factor must be positive and finite.')
-    if not math.isfinite(terminal_input_ohm) or terminal_input_ohm <= 0:
-        raise ValueError('Terminal-board input impedance must be positive and finite.')
     voltage_mv = float(voltage_mv)
     if not math.isfinite(voltage_mv):
         return math.nan, math.nan, 'nonfinite_voltage'
@@ -86,10 +79,7 @@ def convert_ch2(
     if voltage_mv <= 0:
         return math.nan, math.nan, 'nonpositive_voltage_check_polarity'
     sensor_voltage_v = voltage_mv * 1e-3 * scale_factor
-    thermistor_current_a = excitation_a - sensor_voltage_v / terminal_input_ohm
-    if thermistor_current_a <= 0:
-        return math.nan, math.nan, 'nonpositive_thermistor_current_check_scale_or_wiring'
-    resistance = sensor_voltage_v / thermistor_current_a
+    resistance = sensor_voltage_v / excitation_a
     r_min, r_max = RESISTANCE_OHM[-1], RESISTANCE_OHM[0]
     tolerance = 1e-9 * r_max
     if not r_min - tolerance <= resistance <= r_max + tolerance:
@@ -115,7 +105,7 @@ output_3_voltage = 9.0
 
 SETPOINT = 120.0
 
-RAMP_TIME = 15 * 60       # 20 minutes in seconds
+RAMP_TIME = 20 * 60       # 20 minutes in seconds
 
 initial_temperature = None
 ramp_start_time = None
@@ -191,8 +181,8 @@ supply.write("OUTPut ON")
 print("Keysight PSU connected")
 print(f"Starting voltage = {start_voltage:.2f} V")
 print(f"Output 3 fixed voltage = {output_3_voltage:.2f} V")
-print(f"CH2 terminal board: scale = {TERMINAL_BOARD_SCALE:g}, "
-      f"input impedance = {TERMINAL_BOARD_INPUT_OHM:g} ohm")
+print(f"CH2 terminal board: scale = {TERMINAL_BOARD_SCALE:g}; "
+      "buffered input, no input-impedance correction")
 
 # ============================================================
 # PID / DATA INITIALISATION
@@ -232,8 +222,7 @@ csv_writer.writerow([
     "out_of_loop_sensor_voltage_mV",
     "out_of_loop_thermistor_current_uA",
     "excitation_current_A",
-    "terminal_board_scale",
-    "terminal_board_input_ohm"
+    "terminal_board_scale"
 ])
 
 print(f"Logging to {csv_filename}")
@@ -286,19 +275,15 @@ def update(frame):
 
     temp_c = float(temps[1])
 
-    # CH2 raw mV -> undo attenuation -> subtract board input current -> R -> T.
+    # CH2 raw mV -> undo attenuation -> divide by fixed excitation current -> R -> T.
     out_of_loop_voltage_mv = float(temps[2])
     out_of_loop_sensor_voltage_mv = out_of_loop_voltage_mv * TERMINAL_BOARD_SCALE
-    out_of_loop_thermistor_current_ua = (
-        excitation_current
-        - out_of_loop_sensor_voltage_mv * 1e-3 / TERMINAL_BOARD_INPUT_OHM
-    ) * 1e6
+    out_of_loop_thermistor_current_ua = excitation_current * 1e6
     out_of_loop_resistance, out_of_loop_temp_c, out_of_loop_status = convert_ch2(
         out_of_loop_voltage_mv,
         overflow.value,
         excitation_current,
         scale_factor=TERMINAL_BOARD_SCALE,
-        terminal_input_ohm=TERMINAL_BOARD_INPUT_OHM,
     )
 
 # Initialise ramp on first temperature reading
@@ -378,8 +363,7 @@ def update(frame):
         out_of_loop_sensor_voltage_mv,
         out_of_loop_thermistor_current_ua,
         excitation_current,
-        TERMINAL_BOARD_SCALE,
-        TERMINAL_BOARD_INPUT_OHM
+        TERMINAL_BOARD_SCALE
     ])
     csv_file.flush()
 
